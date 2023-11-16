@@ -3,15 +3,16 @@
 import rospy
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import PointStamped
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import PointStamped
 
 import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 import struct
 
-import pickle
-
 discretization_size = 0.5
+decimals_to_round_for_map = 3
+global_beacons_map = {}
 
 def cartesian_to_spherical(vec):
     x = vec[0]
@@ -25,6 +26,78 @@ def cartesian_to_spherical(vec):
         np.arctan2(y, x),
         np.arccos(z / r)
     ])
+
+def odometry(beaconA_relative, beaconB_relative, beaconA_absolute, beaconB_absolute):
+    pass
+
+def get_lidar_position(beacons_found):
+    global global_beacons_map
+
+    # this beacon will contain both the current beacons positions and
+    # the real beacons positions, it's important to mention that these
+    # two beacons aren't the matching ones to the ones found in the
+    # global_beacons_map
+    available_beacons_to_perform_odometry = []
+
+    # get all beacons with recognized distances
+    for first_beacon in range(len(beacons_found)):
+        for second_beacon in range(first_beacon, len(beacons_found)):
+            rounded_beacons_distance = round(distance(beacons_found[first_beacon], beacons_found[second_beacon]), decimals_to_round_for_map)
+
+            if rounded_beacons_distance in global_beacons_map:
+                available_beacons_to_perform_odometry.append([
+                    [beacons_found[first_beacon], beacons_found[second_beacon]], 
+                ])
+
+    # we need at least 3 beacons to be able to find our position
+    if len(available_beacons_to_perform_odometry) < 3:
+        raise Exception("Did not found at least 3 beacons to perform odometry")
+
+    position_approximation = (0, 0, 0)
+
+    # now we use these beacons to find our position
+    # we will do an average of the found beacons to get
+    # a better approximation of our position
+    for beacon in range(2, len(available_beacons_to_perform_odometry)):
+        beaconA = available_beacons_to_perform_odometry[beacon]
+        beaconB = available_beacons_to_perform_odometry[beacon - 1]
+        beaconC = available_beacons_to_perform_odometry[beacon - 2]
+
+        A_B_rounded_beacons_distance = round(distance(beaconA, beaconB), decimals_to_round_for_map)
+        A_C_rounded_beacons_distance = round(distance(beaconA, beaconC), decimals_to_round_for_map)
+
+        real_beacons_A_B = global_beacons_map[A_B_rounded_beacons_distance]
+        real_beacons_A_C = global_beacons_map[A_C_rounded_beacons_distance]
+
+        beaconA_absolute = None
+        beaconB_absolute = None
+        beaconC_absolute = None
+
+        # now we match the relative beacons to the absolute ones
+        if real_beacons_A_B[0] in real_beacons_A_C: # first beacon is beaconA
+            beaconA_absolute = real_beacons_A_B[0]
+            beaconB_absolute = real_beacons_A_B[1]
+
+            if real_beacons_A_B[0] == real_beacons_A_C[0]:
+                beaconC_absolute = real_beacons_A_C[1]
+            else:
+                beaconC_absolute = real_beacons_A_C[0]
+
+        else:
+            beaconA_absolute = real_beacons_A_B[1]
+            beaconB_absolute = real_beacons_A_B[0]
+
+            if real_beacons_A_B[0] == real_beacons_A_C[0]:
+                beaconC_absolute = real_beacons_A_C[1]
+            else:
+                beaconC_absolute = real_beacons_A_C[0]
+
+        # ahora podemos hacer nuestra odometria varias veces y hacer un promedio
+        odometry(beaconA, beaconB, beaconA_absolute, beaconB_absolute)
+        odometry(beaconA, beaconC, beaconA_absolute, beaconC_absolute)
+        odometry(beaconC, beaconB, beaconC_absolute, beaconB_absolute)
+
+    return True, (0, 0, 0)
 
 def hash(point, mins, lengths, spaces):
     hash_x = int(((point[0] - mins[0] + 0.001) / lengths[0]) * spaces[0])
@@ -52,8 +125,6 @@ def get_all_valid_neighbors(grid, point, hashed_point, max_distance):
 
     return valid_neighbors
 
-
-
 class Point:
     def __init__(self, x, y, z, intensity, ring, time):
         self.x = x
@@ -63,7 +134,10 @@ class Point:
         self.ring = ring
         self.time = time
 
+pub = rospy.Publisher("/visualization_marker", PointStamped, queue_size = 2)
+
 def callback(msg):
+    global marker_pub
     points = []
 
     for i in range(0, len(msg.data), 22):
@@ -77,7 +151,7 @@ def callback(msg):
         if intensity > 200:
             points.append(Point(x, y, z, intensity, ring, time))
 
-    print("Processing points")
+    # print("Processing points")
     scan_points = len(points)
 
     all_points = np.zeros((scan_points, 3))
@@ -100,7 +174,7 @@ def callback(msg):
 
     point_to_color = {}
 
-# filter points based on their intensity
+    # filter points based on their intensity
     for i in range(scan_points):
         data = [0, 0, 0]
         data[0] = points[i].x
@@ -139,18 +213,8 @@ def callback(msg):
     spaces_z = int(length_z / discretization_size) + 1
 
     mins = (min_x, min_y, min_z)
-    maxs = (max_x, max_y, max_z)
     lengths = (length_x, length_y, length_z)
     spaces = (spaces_x, spaces_y, spaces_z)
-
-    print("min x:", min_x)
-    print("max x:", max_x)
-    print("min y:", min_y)
-    print("max y:", max_y)
-    print("min z:", min_z)
-    print("max z:", max_z)
-
-    print(spaces_x, spaces_y, spaces_z)
 
     for i in points_positions:
         hash_x = int(((i[0] - min_x + 0.001) / length_x) * spaces_x)
@@ -163,7 +227,7 @@ def callback(msg):
         else:
             spatial_hashmap[(hash_x, hash_y, hash_z)] = [(i[0], i[1], i[2])]
 
-    print("SEARCHING POINT CLOUD FOR RETROREFLECTORS")
+    # print("SEARCHING POINT CLOUD FOR RETROREFLECTORS")
 
     # save all points we haven't yet found for later
     points_yet_to_find = set()
@@ -195,7 +259,7 @@ def callback(msg):
         distinct_retroreflectors_found += 1
         points_searched = 0
 
-        print("starting again from point", curr_starting_point)
+        # print("starting again from point", curr_starting_point)
         to_search.add(curr_starting_point)
 
         # depth first search based on distances using a hash map to accelerate neighbors search
@@ -238,81 +302,20 @@ def callback(msg):
 
     print("DISTINCT RETROREFLECTORS FOUND:", distinct_retroreflectors_found)
 
-# get rid of extra, unused found retroreflectors
+    # get rid of extra, unused found retroreflectors
     retroreflector_centers = retroreflector_centers[:distinct_retroreflectors_found]
-    retroreflector_centers_np_arr = np.zeros((len(retroreflector_centers), 3))
 
-    for i in range(len(retroreflector_centers)):
-        retroreflector_centers_np_arr[i] = [retroreflector_centers[i][0], retroreflector_centers[i][1], retroreflector_centers[i][2]]
+    for i in retroreflector_centers:
+        point = PointStamped()
+        point.header.stamp = rospy.Time.now()
+        point.header.frame_id = "/velodyne"
+        point.point.x = i[0]
+        point.point.y = i[1]
+        point.point.z = i[2]
 
-    retroreflectors_points = retroreflectors_points[:distinct_retroreflectors_found]
+        pub.publish(point)
 
-# find all beacons by searching up and down every retroreflector
-    distinct_beacons_points = []
-    beacons_centers = np.zeros((10, 3))
-    current_searched_beacon = 0
-
-# we will be consuming the retroreflector point sets, so we will just check if there's at least one left
-    while len(retroreflectors_points) != 0:
-
-        distinct_beacons_points.append(set())
-
-        # search up above the retroreflector
-        current_retroreflector_points = retroreflectors_points.pop()
-        current_retroreflector_center = retroreflector_centers.pop()
-
-        # print("retroreflector points", current_retroreflector_points)
-
-        # we begin our beacon considering all retroreflector points
-        distinct_beacons_points[-1].update(current_retroreflector_points)
-        # print("beacon points", distinct_beacons_points[-1])
-
-        # we will search a position above our current
-        search_range = 0.8
-
-        hash_pos = hash(current_retroreflector_center, mins, lengths, spaces)
-        points_around = get_all_valid_neighbors(spatial_hashmap, current_retroreflector_center, hash_pos, search_range) # verify this distance is good
-
-        last_position = current_retroreflector_center
-        should_continue_searching = True
-
-        # while we are still finding retroreflectors above the current points
-        while should_continue_searching:
-            point_to_compare = points_around[0]
-            found_valid_continuation = False
-
-            # check in which of our retroreflectors the points is
-            i = 0
-            while i < len(retroreflectors_points):
-                if point_to_compare in retroreflectors_points[i]:
-                    found_valid_continuation = True
-                    # we found a set which contains the one of the points above our past retroreflector
-                    # we should consume the whole retroreflector and make a single beacon
-                    distinct_beacons_points[-1].union(retroreflectors_points.pop(i))
-                    temp_retroreflector_center = retroreflector_centers.pop(i)
-                    print(current_retroreflector_center, temp_retroreflector_center, distance(current_retroreflector_center, temp_retroreflector_center))
-
-                    new_retroreflector_center = (
-                        current_retroreflector_center[0] + temp_retroreflector_center[0],
-                        current_retroreflector_center[1] + temp_retroreflector_center[1],
-                        current_retroreflector_center[2] + temp_retroreflector_center[2]
-                    )
-                else:
-                    i += 1
-
-            should_continue_searching = found_valid_continuation
-            last_position = point_to_compare
-
-            hash_pos = hash(point_to_compare, mins, lengths, spaces)
-            points_around = get_all_valid_neighbors(spatial_hashmap, point_to_compare, hash_pos, search_range) # TODO verify this distance is good
-
-        beacons_centers[current_searched_beacon] = current_retroreflector_center
-        current_searched_beacon += 1
-
-    beacons_centers = beacons_centers[:current_searched_beacon]
-    beacons_spherical_coords = np.zeros((len(beacons_centers), 3))
-
-    print("BEACONS FOUND", len(beacons_centers))
+    # for retroreflector in retroreflector_centers:
 
 def listener():
     topic = rospy.get_param('~topic', '/velodyne_points')
@@ -323,4 +326,4 @@ if __name__ == '__main__':
     rospy.init_node('pylistener', anonymous = True)
     listener()
 
-    print("saving")
+    # print("saving")
