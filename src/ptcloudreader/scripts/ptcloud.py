@@ -2,17 +2,85 @@
 
 import rospy
 from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import PointStamped
-from visualization_msgs.msg import Marker
 from geometry_msgs.msg import PointStamped
+
+import global_settings
 
 import numpy as np
 import struct
 
-discretization_size = 0.5
-decimals_to_round_for_map = 3
-global_beacons_map = {}
+class Point:
+    def __init__(self, x, y, z, intensity, ring, time):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.intensity = intensity
+        self.ring = ring
+        self.time = time
+
+pub = rospy.Publisher("/visualization_marker", PointStamped, queue_size = 2)
+pub_lidar = rospy.Publisher("/visualization_marker_lidar", PointStamped, queue_size = 2)
+
+def relative_to_absolute_beacons_translation(
+    relative_beacons,
+    absolute_beacons_map,
+):
+    # we will choose 2 random beacons and get their matching absolute beacons
+    relative_beacon_A, relative_beacon_B  = (relative_beacons[0], relative_beacons[1])
+
+    relative_A_B_distance = round(np.linalg.norm(relative_beacon_A - relative_beacon_B), global_settings.decimals_to_round_for_map)
+    absolute_beaconA, absolute_beaconB = absolute_beacons_map[relative_A_B_distance]
+
+    # absolute_beaconA could be either relative_beaconA or relative_beaconB,
+    # since we don't know, we will have to choose a new distance to find out,
+    # in this case we will choose relative_beacon_A and any other that isn't relative_beacon_B
+    relative_beacon_C = relative_beacons[2]
+
+    relative_A_C_distance = round(np.linalg.norm(relative_beacon_A - relative_beacon_C), global_settings.decimals_to_round_for_map)
+
+    absolute_beacons_A_C = absolute_beacons_map[relative_A_C_distance]
+
+    # print("19283102983")
+    # print(relative_beacon_A)
+    # print(absolute_beaconA, absolute_beacons_A_C)
+    # print("19283102983")
+
+    # relative_beacons_A_C = relative_beacons_map[relative_A_C_distance]
+
+    '''
+    relative_A_B_distance (relative_beacons) -> RA, RB (RelativeA, RelativeB)
+    relative_A_B_distance (absolute_beacons) -> AA, AB (AbsoluteA, AbsoluteB)
+
+    relative_A_C_distance (relative_beacons) -> RA, RC
+    relative_A_C_distance (absolute_beacons) -> AA, AC
+
+    we can know which relative beacon matches which absolute beacon by seeing which one
+    is repeated on both distances, in this case AA and RA, this may seem obvious but
+    the beacons could be in any order so this step is necessary
+    '''
+
+    repeated_beacon_absolute = None
+
+    # get the beacon that's repeated in from the absolute beacons
+    if all(absolute_beaconA == absolute_beacons_A_C[0]) or all(absolute_beaconA == absolute_beacons_A_C[1]):
+        repeated_beacon_absolute = absolute_beaconA
+    else:
+        repeated_beacon_absolute = absolute_beaconB
+
+    # now we can say for sure that relative_beacon_A is repeated_beacon_absolute
+    # just translated, now we only have to find this translation
+    # print(repeated_beacon_absolute, relative_beacon_A)
+    return repeated_beacon_absolute - relative_beacon_A
+
+def round_vector(vec):
+    rounded_pos = (
+        round(vec[0], 1),
+        round(vec[1], 1),
+        round(vec[2], 1)
+    )
+
+    return rounded_pos
 
 def cartesian_to_spherical(vec):
     x = vec[0]
@@ -28,46 +96,81 @@ def cartesian_to_spherical(vec):
     ])
 
 def odometry(beaconA_relative, beaconB_relative, beaconA_absolute, beaconB_absolute):
-    pass
+    beaconA_relative_spherical_coords = cartesian_to_spherical(beaconA_relative)
+    beaconB_relative_spherical_coords = cartesian_to_spherical(beaconB_relative)
+
+    _, theta1, phi1 = (beaconA_relative_spherical_coords[0], beaconA_relative_spherical_coords[1], beaconA_relative_spherical_coords[2])
+    _, theta2, phi2 = (beaconB_relative_spherical_coords[0], beaconB_relative_spherical_coords[1], beaconB_relative_spherical_coords[2])
+
+    Ax, _, Az = (beaconA_absolute[0], beaconA_absolute[1], beaconA_absolute[2])
+    Bx, _, Bz = (beaconB_absolute[0], beaconB_absolute[1], beaconB_absolute[2])
+
+    up = Ax + np.tan(phi1) * np.cos(theta1) * (Bz - Az) - Bx
+    down = np.sin(phi2) * np.cos(theta2) - np.tan(phi1) * np.cos(phi2) * np.cos(theta1)
+
+    new_r2 = up / down
+
+    B_e = np.array([
+        new_r2 * np.sin(phi2) * np.cos(theta2),
+        new_r2 * np.sin(phi2) * np.sin(theta2),
+        new_r2 * np.cos(phi2)
+    ])
+
+    real_lidar_pos = B_e + beaconB_absolute
+    return np.array(real_lidar_pos)
+    # print("real lidar position", [round(real_lidar_pos[0], 1), round(real_lidar_pos[1], 1), round(real_lidar_pos[2], 1)])
+
+# dados todos los beacons, crea un mapa de distancias nuevo
+def create_new_beacons_distance_map(beacons):
+    new_beacon_distance_map = {}
+
+    for first_beacon in range(len(beacons)):
+        for second_beacon in range(first_beacon, len(beacons)):
+            if first_beacon != second_beacon:
+                beacons_distance = distance(beacons[first_beacon], beacons[second_beacon])
+
+                if beacons_distance not in new_beacon_distance_map and beacons_distance > global_settings.min_valid_distance_between_beacons:
+                    new_beacon_distance_map[beacons_distance] = [beacons[first_beacon], beacons[second_beacon]]
+
+    return new_beacon_distance_map
 
 def get_lidar_position(beacons_found):
-    global global_beacons_map
-
     # this beacon will contain both the current beacons positions and
     # the real beacons positions, it's important to mention that these
-    # two beacons aren't the matching ones to the ones found in the
+    # two beacons aren't the matching onelv to the ones found in the
     # global_beacons_map
     available_beacons_to_perform_odometry = []
 
-    # get all beacons with recognized distances
-    for first_beacon in range(len(beacons_found)):
-        for second_beacon in range(first_beacon, len(beacons_found)):
-            rounded_beacons_distance = round(distance(beacons_found[first_beacon], beacons_found[second_beacon]), decimals_to_round_for_map)
-
-            if rounded_beacons_distance in global_beacons_map:
-                available_beacons_to_perform_odometry.append([
-                    [beacons_found[first_beacon], beacons_found[second_beacon]], 
-                ])
-
     # we need at least 3 beacons to be able to find our position
-    if len(available_beacons_to_perform_odometry) < 3:
-        raise Exception("Did not found at least 3 beacons to perform odometry")
+    if len(available_beacons_to_perform_odometry) < 2:
+        print("Did not find at least 3 beacons to perform odometry")
+        return False, (0, 0, 0)
 
-    position_approximation = (0, 0, 0)
+    position_approximation = np.zeros(3)
 
     # now we use these beacons to find our position
     # we will do an average of the found beacons to get
     # a better approximation of our position
+    t = 0
     for beacon in range(2, len(available_beacons_to_perform_odometry)):
+        t += 3
         beaconA = available_beacons_to_perform_odometry[beacon]
         beaconB = available_beacons_to_perform_odometry[beacon - 1]
         beaconC = available_beacons_to_perform_odometry[beacon - 2]
 
-        A_B_rounded_beacons_distance = round(distance(beaconA, beaconB), decimals_to_round_for_map)
-        A_C_rounded_beacons_distance = round(distance(beaconA, beaconC), decimals_to_round_for_map)
+        # print(beaconA, beaconB)
 
-        real_beacons_A_B = global_beacons_map[A_B_rounded_beacons_distance]
-        real_beacons_A_C = global_beacons_map[A_C_rounded_beacons_distance]
+        A_B_rounded_beacons_distance = round(distance(beaconA, beaconB), global_settings.decimals_to_round_for_map)
+        A_C_rounded_beacons_distance = round(distance(beaconA, beaconC), global_settings.decimals_to_round_for_map)
+
+        if A_B_rounded_beacons_distance < global_settings.max_valid_distance_between_points_of_beacons or A_C_rounded_beacons_distance < global_settings.max_valid_distance_between_points_of_beacons:
+            return False, (0, 0, 0)
+
+        real_beacons_A_B = global_settings.global_beacons_map[A_B_rounded_beacons_distance]
+        real_beacons_A_C = global_settings.global_beacons_map[A_C_rounded_beacons_distance]
+
+        # print("absolute:", real_beacons_A_B)
+        # print("relative:", [beaconA, beaconB])
 
         beaconA_absolute = None
         beaconB_absolute = None
@@ -92,13 +195,43 @@ def get_lidar_position(beacons_found):
             else:
                 beaconC_absolute = real_beacons_A_C[0]
 
+        # point = PointStamped()
+        # point.header.stamp = rospy.Time.now()
+        # point.header.frame_id = "/velodyne"
+        # point.point.x = round(beaconA_absolute[0], 1)
+        # point.point.y = round(beaconA_absolute[1], 1)
+        # point.point.z = round(beaconA_absolute[2], 1)
+
+        # pub.publish(point)
+
+        # point = PointStamped()
+        # point.header.stamp = rospy.Time.now()
+        # point.header.frame_id = "/velodyne"
+        # point.point.x = round(beaconB_absolute[0], 1)
+        # point.point.y = round(beaconB_absolute[1], 1)
+        # point.point.z = round(beaconB_absolute[2], 1)
+
+        # pub.publish(point)
+
+        # point = PointStamped()
+        # point.header.stamp = rospy.Time.now()
+        # point.header.frame_id = "/velodyne"
+        # point.point.x = round(beaconC_absolute[0], 1)
+        # point.point.y = round(beaconC_absolute[1], 1)
+        # point.point.z = round(beaconC_absolute[2], 1)
+
+        # pub.publish(point)
+
         # ahora podemos hacer nuestra odometria varias veces y hacer un promedio
-        odometry(beaconA, beaconB, beaconA_absolute, beaconB_absolute)
-        odometry(beaconA, beaconC, beaconA_absolute, beaconC_absolute)
-        odometry(beaconC, beaconB, beaconC_absolute, beaconB_absolute)
+        position_approximation += odometry(beaconA, beaconB, beaconA_absolute, beaconB_absolute)
+        # position_approximation += odometry(beaconA, beaconC, beaconA_absolute, beaconC_absolute)
+        # position_approximation += odometry(beaconC, beaconB, beaconC_absolute, beaconB_absolute)
 
-    return True, (0, 0, 0)
+    # position_approximation /= t
 
+    return True, position_approximation
+
+# the hash function truncates the position to an integer within a range
 def hash(point, mins, lengths, spaces):
     hash_x = int(((point[0] - mins[0] + 0.001) / lengths[0]) * spaces[0])
     hash_y = int(((point[1] - mins[1] + 0.001) / lengths[1]) * spaces[1])
@@ -109,10 +242,14 @@ def hash(point, mins, lengths, spaces):
 def distance(vec1, vec2):
     return np.linalg.norm(np.array(vec1) - np.array(vec2))
 
+# use the hashed points to quickly get all neighbors within radius
 def get_all_valid_neighbors(grid, point, hashed_point, max_distance):
     valid_neighbors = []
 
-    size = int(max_distance / discretization_size) + 1
+    # the number of cubes to search as a radius
+    size = int(max_distance / global_settings.discretization_size) + 1
+  
+    # search neighbors in a cube around the point to search
     for x in range(-size, size):
         for y in range(-size, size):
             for z in range(-size, size):
@@ -125,63 +262,38 @@ def get_all_valid_neighbors(grid, point, hashed_point, max_distance):
 
     return valid_neighbors
 
-class Point:
-    def __init__(self, x, y, z, intensity, ring, time):
-        self.x = x
-        self.y = y
-        self.z = z
-        self.intensity = intensity
-        self.ring = ring
-        self.time = time
-
-pub = rospy.Publisher("/visualization_marker", PointStamped, queue_size = 2)
-
-def callback(msg):
-    global marker_pub
+# get points from the msg array PointCloud2 and put them into
+# List[Point]
+def get_points_from_data_array(msg_data):
     points = []
 
-    for i in range(0, len(msg.data), 22):
-        x = struct.unpack('f', msg.data[i : i+4])[0]
-        y = struct.unpack('f', msg.data[i+4 : i+8])[0]
-        z = struct.unpack('f', msg.data[i+8 : i+12])[0]
-        intensity = struct.unpack('f', msg.data[i+12 : i+16])[0]
-        ring = struct.unpack('H', msg.data[i+16 : i+18])[0]
-        time = struct.unpack('f', msg.data[i+18 : i+22])[0]
+    # check the datatype of the message 
+    for i in range(0, len(msg_data), 22):
+        x = struct.unpack('f', msg_data[i : i+4])[0]
+        y = struct.unpack('f', msg_data[i+4 : i+8])[0]
+        z = struct.unpack('f', msg_data[i+8 : i+12])[0]
+        intensity = struct.unpack('f', msg_data[i+12 : i+16])[0]
+        ring = struct.unpack('H', msg_data[i+16 : i+18])[0]
+        time = struct.unpack('f', msg_data[i+18 : i+22])[0]
 
-        if intensity > 200:
-            points.append(Point(x, y, z, intensity, ring, time))
+        if intensity > global_settings.min_intensity:
+            points.append([x, y, z])
 
-    # print("Processing points")
+    return np.array(points)
+
+# get a few necessary values to hash all points
+def get_hashmap_values(points):
     scan_points = len(points)
-
-    all_points = np.zeros((scan_points, 3))
-    all_points_colors = np.zeros(scan_points)
-
-    spatial_hashmap = {}
-    max_valid_distance = 0.1
-
-    points_positions = []
-    points_colors = []
-
     min_x = 10000000
     max_x = -10000000
     min_y = 10000000
     max_y = -10000000
     min_z = 10000000
     max_z = -10000000
-    min_intensity = 10000000
-    max_intensity = -10000000
 
-    point_to_color = {}
-
-    # filter points based on their intensity
+    # get min and max values of the x, y, z and intensities
     for i in range(scan_points):
-        data = [0, 0, 0]
-        data[0] = points[i].x
-        data[1] = points[i].y
-        data[2] = points[i].z
-
-        # if (points[i].intensity[0]) > 200:
+        data = [points[i][0], points[i][1], points[i][2]]
 
         min_x = min(min_x, data[0])
         max_x = max(max_x, data[0])
@@ -190,48 +302,42 @@ def callback(msg):
         min_z = min(min_z, data[2])
         max_z = max(max_z, data[2])
 
-        min_intensity = min(min_intensity, points[i].intensity)
-        max_intensity = max(max_intensity, points[i].intensity)
-
-        points_colors.append(points[i].intensity)
-        points_positions.append(data)
-
-        point_to_color[tuple(data)] = points[i].intensity
-
-        all_points[i][0] = data[0]
-        all_points[i][1] = data[1]
-        all_points[i][2] = data[2]
-        all_points_colors[i] = points[i].intensity
-
-# get lengths for the hashing algorithm
+    # get lengths for the hashing algorithm
     length_x = max_x - min_x
     length_y = max_y - min_y
     length_z = max_z - min_z
 
-    spaces_x = int(length_x / discretization_size) + 1
-    spaces_y = int(length_y / discretization_size) + 1
-    spaces_z = int(length_z / discretization_size) + 1
+    spaces_x = int(length_x / global_settings.discretization_size) + 1
+    spaces_y = int(length_y / global_settings.discretization_size) + 1
+    spaces_z = int(length_z / global_settings.discretization_size) + 1
 
     mins = (min_x, min_y, min_z)
     lengths = (length_x, length_y, length_z)
     spaces = (spaces_x, spaces_y, spaces_z)
 
-    for i in points_positions:
-        hash_x = int(((i[0] - min_x + 0.001) / length_x) * spaces_x)
-        hash_y = int(((i[1] - min_y + 0.001) / length_y) * spaces_y)
-        hash_z = int(((i[2] - min_z + 0.001) / length_z) * spaces_z)
+    return mins, lengths, spaces
 
-        grid_pos = (hash_x, hash_y, hash_z)
+def callback(msg):
+    global marker_pub
+
+    points = get_points_from_data_array(msg.data)
+    mins, lengths, spaces = get_hashmap_values(points)
+
+    spatial_hashmap = {}
+
+    for i in points:
+        grid_pos = hash(i, mins, lengths, spaces)
+
         if grid_pos in spatial_hashmap:
-            spatial_hashmap[(hash_x, hash_y, hash_z)].append((i[0], i[1], i[2]))
+            spatial_hashmap[grid_pos].append((i[0], i[1], i[2]))
         else:
-            spatial_hashmap[(hash_x, hash_y, hash_z)] = [(i[0], i[1], i[2])]
+            spatial_hashmap[grid_pos] = [(i[0], i[1], i[2])]
 
     # print("SEARCHING POINT CLOUD FOR RETROREFLECTORS")
 
     # save all points we haven't yet found for later
     points_yet_to_find = set()
-    for i in points_positions:
+    for i in points:
         points_yet_to_find.add(tuple(i))
 
     to_search = set()
@@ -241,15 +347,14 @@ def callback(msg):
     retroreflector_centers = []
 
     found_points_set = set()
-    found_points = np.zeros((len(points_positions), 3))
-    found_points_colors = np.zeros(len(points_positions))
-    found_points[0, :] = points_positions[0]
+    found_points = np.zeros((len(points), 3))
+    found_points[0, :] = points[0]
     found_points_counter = 0
     initial_points = np.zeros((10, 3))
 
     distinct_retroreflectors_found = 0
 
-# keep taking random points (which arent part of a retroreflector) until all have been explored
+    # keep taking random points (which arent part of a retroreflector) until all have been explored
     while len(points_yet_to_find) != 0:
         retroreflectors_points.append(set())
         retroreflector_centers_temp = [0, 0, 0]
@@ -279,18 +384,17 @@ def callback(msg):
 
             hash_pos = hash(curr_node_to_search, mins, lengths, spaces)
 
-            valid_neighbors = get_all_valid_neighbors(spatial_hashmap, curr_node_to_search, hash_pos, max_valid_distance)
+            valid_neighbors = get_all_valid_neighbors(spatial_hashmap, curr_node_to_search, hash_pos, global_settings.max_valid_distance_between_points_of_beacons)
 
             for neighbor in valid_neighbors:
                 if (neighbor not in found_points_set) and (neighbor not in to_search):
                     to_search.add(neighbor)
                     found_points_set.add(neighbor)
                     found_points[found_points_counter] = neighbor
-                    found_points_colors[found_points_counter] = point_to_color[neighbor] / 255
                     found_points_counter += 1
 
         # filter out all retroreflectors too small to be considered
-        if points_searched < 4:
+        if points_searched < global_settings.min_points_to_find_to_consider_beacon:
             distinct_retroreflectors_found -= 1
 
         # calculate average of position for center of the shape
@@ -305,17 +409,57 @@ def callback(msg):
     # get rid of extra, unused found retroreflectors
     retroreflector_centers = retroreflector_centers[:distinct_retroreflectors_found]
 
-    for i in retroreflector_centers:
+    for i in range(len(retroreflector_centers)):
+        # global_settings.unique_beacons_positions_ever_found.add(i)
+
+        retroreflector_centers[i] = round_vector(retroreflector_centers[i])
+
         point = PointStamped()
         point.header.stamp = rospy.Time.now()
         point.header.frame_id = "/velodyne"
-        point.point.x = i[0]
-        point.point.y = i[1]
-        point.point.z = i[2]
+        point.point.x = retroreflector_centers[i][0]
+        point.point.y = retroreflector_centers[i][1]
+        point.point.z = retroreflector_centers[i][2]
 
         pub.publish(point)
 
-    # for retroreflector in retroreflector_centers:
+    global_distances_map = create_new_beacons_distance_map(retroreflector_centers)
+
+    for i in global_distances_map:
+        print(i, global_distances_map[i])
+
+    # if global_settings.should_update_global_distances_map:
+    #     for ai in global_settings.unique_beacons_positions_ever_found:
+    #         for bi in global_settings.unique_beacons_positions_ever_found:
+    #             if ai != bi:
+    #                 # beaconA = (retroreflector_centers[ai][0], retroreflector_centers[ai][1])
+    #                 # beaconB = (retroreflector_centers[bi][0], retroreflector_centers[bi][1])
+
+    #                 rounded_beacons_distance = round(distance(ai, bi), global_settings.decimals_to_round_for_map)
+    #                 distance_is_already_recorded = rounded_beacons_distance not in global_settings.global_beacons_map
+    #                 distance_is_not_too_small = rounded_beacons_distance > global_settings.max_valid_distance_between_points_of_beacons
+
+    #                 if distance_is_already_recorded and distance_is_not_too_small and (ai, bi) not in global_settings.compared_beacons and (bi, ai) not in global_settings.compared_beacons:
+    #                     global_settings.global_beacons_map[rounded_beacons_distance] = [ai, bi]
+    #                     global_settings.compared_beacons[(ai, bi)] = rounded_beacons_distance
+
+    # # print(retroreflector_centers)
+    # result, pos = get_lidar_position(retroreflector_centers)
+
+    # print(
+    #     round(pos[0], 1),
+    #     round(pos[1], 1),
+    #     round(pos[2], 1)
+    # )
+
+    # point = PointStamped()
+    # point.header.stamp = rospy.Time.now()
+    # point.header.frame_id = "/velodyne"
+    # point.point.x = pos[0]
+    # point.point.y = pos[1]
+    # point.point.z = pos[2]
+
+    # pub_lidar.publish(point)
 
 def listener():
     topic = rospy.get_param('~topic', '/velodyne_points')
