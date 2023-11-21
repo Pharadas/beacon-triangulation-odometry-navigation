@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+
+<launch>
+
+<node pkg="ptcloudreader" type="ptcloud.py" name="ptcloud"
+output="screen" launch-prefix="konsole --noclose -e" />
+
+<include file="$(find velodyne_pointcloud)/launch/VLP16_points.launch" />
+
+
+
+</launch>
