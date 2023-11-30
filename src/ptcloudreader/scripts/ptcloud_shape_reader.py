@@ -81,7 +81,7 @@ from geometry_msgs.msg import PointStamped
 import random
 
 def talker():
-    pub = rospy.Publisher('chatter', PointStamped, queue_size=10)
+    pub = rospy.Publisher('chatter', String, queue_size=10)
     rospy.init_node('talker', anonymous=True)
     rate = rospy.Rate(10) # 10hz
 
@@ -93,7 +93,7 @@ def talker():
         point.point.y = random.random() * 10 - 5
         point.point.z = random.random() * 10 - 5
 
-        pub.publish(point)
+        pub.publish("gaming time")
         print(point)
         rate.sleep()
 
