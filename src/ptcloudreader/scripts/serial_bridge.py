@@ -3,7 +3,10 @@
 import rospy 
 import numpy as np
 import serial 
-import ackermann_msgs
+#import ackermann_msgs
+
+from ackermann_msgs.msg import AckermannDrive
+
 
 
 """
@@ -24,18 +27,26 @@ ID  Length  D[0]
 83  1       Angle
 
 Angle: 0-100 
+
+brakes 
+ID  Length  D[0]    
+66  1       pos
+
+
+
 """
 steerMin= -17
 steerMax = 17
 
 
 ser = serial.Serial(
-    port='COM7',
+    port='/dev/ttyUSB0',
     baudrate=115200,
     parity=serial.PARITY_NONE,
     stopbits=serial.STOPBITS_ONE,
     bytesize=serial.EIGHTBITS,
-    rtscts=True
+    rtscts=True,
+    timeout = 1
 )
 
 ser.isOpen()
@@ -46,22 +57,19 @@ def callback(msg):
 
     if angle > 17 :
         angle = 17
-    elif mapped_angle < -17:
+    elif angle < -17:
         angle = -17
 
     directionScaled = float(angle + 17) / float(34)
     mapped_angle = int((directionScaled*(100)))
 
-    ser.write("83 1 " + str(mapped_angle))
-
-
-
-
-
+    # ser.write("83 1 " + str(mapped_angle))
+    ser.write(str.encode("83 1 50 "))
+    print("gaming time")
 
 def listener():
     topic = rospy.get_param('~topic', '/pure_pursuit/control')
-    rospy.Subscriber(topic, control, callback)
+    rospy.Subscriber(topic, AckermannDrive, callback)
     rospy.spin()
 
 if __name__ == '__main__':
