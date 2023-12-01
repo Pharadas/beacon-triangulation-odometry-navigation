@@ -28,16 +28,61 @@ ID  Length  D[0]
 
 Angle: 0-100 
 
+######################################
+
 brakes 
 ID  Length  D[0]    
-66  1       pos
+66  1       state
 
-
+State: 0-1
 
 """
+
 steerMin= -17
 steerMax = 17
 
+def translate(value, leftMin, leftMax, rightMin, rightMax):
+    # Figure out how 'wide' each range is
+    leftSpan = leftMax - leftMin
+    rightSpan = rightMax - rightMin
+
+    # Convert the left range into a 0-1 range (float)
+    valueScaled = float(value - leftMin) / float(leftSpan)
+
+    # Convert the 0-1 range into a value in the right range.
+    return rightMin + (valueScaled * rightSpan)
+
+
+def amrSetAngle(theta):
+
+    mapped_angle = translate(theta,-15,15,0,100)
+    ser.write(str.encode("83 1 ")+str.encode(str(mapped_angle)))
+    print("Steering set to:" + mapped_angle)
+
+
+def amrSetSpeed (Speed):
+    
+    mapped_speed= translate(Speed,0,100,0,255)
+    ser.write(str.encode("84 5 ")+str.encode(str(mapped_speed))+" 1 1 0 1")
+    print("Speed set to:" + mapped_speed)
+
+
+def amrSetBreak(State):
+
+    ser.write(str.encode("66 1 ")+str.encode(str(int(State))))
+    print("Break set to:" + State)
+
+
+def amrInit():
+
+    print("Initialazing AMR...")
+    ser.write(str.encode("84 5 0 0 0 0 1"))
+    rospy.sleep(1)
+    ser.write(str.encode("84 5 0 1 0 0 1"))
+    rospy.sleep(1)
+    print("AMR Ready")
+
+    
 
 ser = serial.Serial(
     port='/dev/ttyUSB0',
